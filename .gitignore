@@ -1,0 +1,86 @@
+# ─────────────── Java / Maven ───────────────
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# ─────────────── IDE ───────────────
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+# Eclipse
+.settings/
+.project
+.classpath
+.factorypath
+# VS Code
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# ─────────────── Node / 前端 ───────────────
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+
+# ─────────────── 日志 / 运行时产物 ───────────────
+logs/
+*.log
+*.log.*
+*.pid
+*.seed
+*.gz
+
+# ─────────────── Docker 数据卷（部署练习用） ───────────────
+docker/data/
+docker/mysql-data/
+docker/redis-data/
+docker/rabbitmq-data/
+
+# ─────────────── 本地配置与密钥（千万不要提交） ───────────────
+.env
+.env.*
+!.env.example
+*.local.yml
+application-local.yml
+application-local.yaml
+application-local.properties
+*-secret.yml
+*.pem
+*.p12
+*.jks
+*.keystore
+**/github-mcp.token
+
+# ─────────────── 上传/导出/临时 ───────────────
+uploads/
+temp/
+tmp/
+*.tmp
+*.bak
+*.swp
+*~
+
+# ─────────────── 操作系统 ───────────────
+.DS_Store
+Thumbs.db
+desktop.ini

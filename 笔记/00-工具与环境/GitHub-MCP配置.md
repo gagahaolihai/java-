@@ -190,6 +190,10 @@ git remote add origin https://github.com/gagahaolihai/java-backend-90days.git
 git push -u origin main
 ```
 
+> **📌 当前实际状态（2026-10-10）**：代码**已推送成功**。但仓库实际名字是 `gagahaolihai/java-`（建仓库时输入的中文被 GitHub 过滤，只剩 `java-`）。
+> 建议到 <https://github.com/gagahaolihai/java-/settings> 的 **Rename** 改成 `java-backend-90days`；改完执行 `git remote set-url origin https://github.com/gagahaolihai/java-backend-90days.git` 即可（GitHub 对旧地址有重定向，不改也能推）。
+> 本仓库文档里的 URL 均按**目标名** `java-backend-90days` 书写。
+
 <details>
 <summary><b>推荐：一次性把 SSH 修好，以后推代码再也不用管 token</b></summary>
 
@@ -229,6 +233,36 @@ git push -u origin main
 **1. 建仓库要多一项权限。** fine-grained token 想调用 `create_repository`，必须额外勾 `Administration: Read and write`（`repository_creation: write`）。不勾也行——**手动在网页建好空仓库**即可，此后的推文件、开 Issue/PR 全部不受影响。两种做法可选其一，不要为了省一次点击去放宽 token 权限。
 
 **2. MCP 工具只在新会话可见。** profile 配置支持热重载，但**当前已打开的会话不会刷新工具表**。填好 token 后需要**新开一个会话**才能看到 `mcp__github__*` 工具；若新会话仍看不到，再完全退出并重启 DSH。
+
+### Token 权限实测审计
+
+用 `x-accepted-github-permissions` 响应头逐个端点探测，得到的是**权威结论**（不是猜测）：
+
+| 端点 | 状态 | 服务端声明的必需权限 | 结论 |
+|---|---|---|---|
+| `POST /repos/{r}/git/refs` | 422 | `contents=write` | ✅ 有（422 是参数校验错，说明**鉴权已通过**） |
+| `GET /repos/{r}/issues` | 200 | `issues=read` | ✅ 有 |
+| `GET /repos/{r}/actions/workflows` | 200 | `actions=read` | ✅ 有 |
+| `POST /repos/{r}/issues` | 403 | `issues=write` | ❌ **缺** |
+| `POST /repos/{r}/labels` | 403 | `issues=write; pull_requests=write` | ❌ **缺** |
+| `POST /repos/{r}/pulls` | 403 | `pull_requests=write` | ❌ **缺** |
+| `POST /user/repos`（建仓库） | 403 | `administration=write; repository_creation=write` | ❌ **缺** |
+| `PATCH /repos/{r}`（改名） | 403 | `administration=write` | ❌ **缺** |
+
+**结论**：`Contents` 与 `Metadata` 配对了（所以能推代码），但 `Issues` 和 `Pull requests` 被设成了 **Read-only**，`Administration` 未开。
+
+**下次生成 token 时照这个表勾**（Repository permissions）：
+
+| 权限 | 选什么 | 用途 | 必选? |
+|---|---|---|---|
+| `Metadata` | Read-only | 勾其他项时自动带上 | 强制 |
+| `Contents` | **Read and write** | 推代码、建分支、写文件 | 必选 |
+| `Issues` | **Read and write** | 建/关每日任务与周复盘 Issue | 必选（当前缺） |
+| `Pull requests` | **Read and write** | 开 PR、review、合并 | 必选（当前缺） |
+| `Actions` | Read-only | 看 CI 状态 | 可选 |
+| `Administration` | Read and write | **建仓库 / 改仓库名 / 改描述** | 可选（想全自动才勾） |
+| `Workflows` | Read and write | 让助手改 `.github/workflows/` | 可选 |
+
 
 ---
 

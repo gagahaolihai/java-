@@ -90,6 +90,7 @@ java全栈/
 ├── 进度/                      ← 周报与打卡
 │   ├── 周报模板.md
 │   ├── 投递追踪表.md
+│   ├── issues/               ← ★ 每日任务书 W01D1…（可直接当 GitHub Issue 用）
 │   └── week01.md … week12.md
 │
 └── .github/                   ← Issue / PR 模板（把 GitHub 用成工程现场）

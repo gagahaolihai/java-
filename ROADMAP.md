@@ -103,14 +103,16 @@
 - IO：字节流/字符流、缓冲、`Files`/`Path`、NIO 概念（Channel/Buffer/Selector 只做了解）
 - 常用类：`String`/`StringBuilder`/`StringJoiner`、`BigDecimal`（金额）、日期时间 API（`LocalDateTime`/`DateTimeFormatter`）
 
-**代码产出**（`代码/stage1-javase/`）
-- `day01-oop/` 形状面积计算器（多态 + 接口）
-- `day02-generics/` 泛型结果包装类 `Result<T>` + 泛型工具类
-- `day03-collections/` 手写 ArrayList / HashMap 的简化版（**必须自己写一遍**）
-- `day04-stream/` 学生成绩统计分析（分组、排序、聚合、TopN）
-- `day05-io/` 文件词频统计 + 大文件按行读取
-- `day06-exception/` 自定义异常体系 + 资源自动关闭
-- `day07-practice/` 综合练习：控制台通讯录（增删改查 + 文件持久化）
+**代码产出**（`代码/stage1-javase/`，W1 先用**普通 Java 工程**，W2 学完 Maven 后从 D8 起转 Maven 多模块）
+- `src/day01oop/` 形状面积计算器（多态 + 接口 + equals/hashCode 契约）
+- `src/day02generics/` 泛型结果包装类 `Result<T>` + `Pair<A,B>` + PECS 通配符练习
+- `src/day03collections/` 手写 `MyArrayList` / `MyHashMap` 的简化版（**必须自己写一遍**）
+- `src/day04stream/` 学生成绩统计分析（分组、下游收集器、排序、TopN）
+- `src/day05io/` 文件词频统计 + 大文件按行读取 + 缓冲流性能对比
+- `src/day06exception/` 自定义异常体系 + `AutoCloseable` 资源与异常抑制
+- `src/day07contacts/` 综合练习：控制台通讯录（分层 + 增删改查 + CSV 持久化）
+
+> 每日任务书见 [`进度/issues/`](./进度/issues/)，每份都能单独当天的 GitHub Issue 用。
 
 **笔记产出**（`笔记/01-Java基础/`）
 - `集合-HashMap原理.md`（含手绘扩容流程图）

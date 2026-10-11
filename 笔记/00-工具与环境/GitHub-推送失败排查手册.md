@@ -1,123 +1,212 @@
-# GitHub 推送失败排查手册（国内网络）
+# GitHub 推送失败排查手册（DNS 污染 / IP 阻断）
 
-> 记录于 2026-10-10 ｜ 症状：`git push` 反复失败，但 `api.github.com` 完全正常
+> 首次记录 2026-10-10 ｜ 症状：`git push` 反复失败，但 `api.github.com` 完全正常
 >
-> 这份文档的价值：**下次再遇到，5 分钟内定位**，不用重新摸索一遍。
+> **本文档经过一次结论纠正**：最初的判断是「SNI 阻断」，后来被实验推翻。纠正过程保留在第五节 —— **排查方法论比结论更值得学**。
 
 ---
 
-## 一、症状长什么样
+## 一、症状
 
 ```
-fatal: unable to access 'https://github.com/<user>/<repo>.git/':
-       Recv failure: Connection was reset
 fatal: unable to access 'https://github.com/<user>/<repo>.git/':
        Failed to connect to github.com port 443 after 21074 ms: Could not connect to server
+fatal: unable to access 'https://github.com/<user>/<repo>.git/':
+       Recv failure: Connection was reset
 ```
 
-**关键特征**：同一条网络里，`api.github.com` 一切正常（GitHub API 调用、MCP 握手、建仓库都能成功），只有 `github.com` 的 git 操作失败。
+**关键特征**：同一条网络里 `api.github.com` 一切正常（GitHub API、MCP 握手、建仓库都成功），只有 `github.com` 的 git 操作失败。
 
-> 这个"一半能通一半不通"的现象就是最大的线索 —— 它排除了"整体断网"，指向**针对特定域名的阻断**。
+另外还有一个迷惑现象：**同一台机器，40 分钟前两次 push 成功，之后连续 34 次失败。**
 
----
+## 二、根因（一句话）
 
-## 二、五步诊断（照抄命令）
+**系统 DNS 把 `github.com` 解析到了 `20.205.243.166`，而这个 IP 上的 TLS 连不通；换成 GitHub 的其它 IP（如 `140.82.112.3`）立刻恢复正常。**
 
-### 第 1 步：区分 TCP 层和 TLS 层
+也就是说：**问题出在"解析到哪个 IP"，不在域名、不在证书、不在 SNI。**
+
+## 三、诊断五步（照抄可用）
+
+### 第 1 步：分清"TCP 通"和"TLS 通"
 
 ```powershell
-# TCP 握手（只看端口能不能连上）
 Test-NetConnection -ComputerName github.com -Port 443 -InformationLevel Quiet
 ```
 
-**结果解读**：
+**本次结果：`True`** —— 但 git 依然失败。
 
-| 结果 | 含义 |
-|---|---|
-| `False` 且比较 github.com 与 api.github.com | 域名级阻断，继续第 2 步 |
-| `True` 但 git 报 `Connection was reset` | **TCP 通、TLS 被重置** → 典型的 SNI 阻断（最常见） |
+> ⚠️ **这是最大的陷阱**：`Test-NetConnection` 只做 TCP 三次握手。TCP 通了不代表能发 HTTPS 请求。
+> **判断网络问题必须做到应用层**，否则会被"端口是通的"误导一整天。
 
-### 第 2 步：对照测试各个 GitHub 域名
+### 第 2 步：对照各个 GitHub 域名
 
 ```powershell
-foreach($h in @('github.com','api.github.com','ssh.github.com','codeload.github.com')){
+foreach($h in @('github.com','api.github.com','ssh.github.com')){
   $r = Test-NetConnection -ComputerName $h -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue
-  Write-Output ("{0,-22} : {1}" -f $h, $(if($r){'通'}else{'不通'}))
+  Write-Output ("{0,-20} : {1}" -f $h, $(if($r){'TCP 通'}else{'不通'}))
 }
+```
+
+### 第 3 步（**关键**）：固定 IP 做 TLS 实测
+
+这一步是整次排查的转折点。用 Node 直接对指定 IP 发起 TLS 请求（`servername` 仍是 `github.com`，所以 SNI 不变）：
+
+```javascript
+// test.js —— 用法: node test.js
+const https=require("https");
+const ips=["140.82.112.3","140.82.113.3","140.82.114.3","140.82.121.3","20.205.243.166","140.82.116.3"];
+const test=(ip)=>new Promise(res=>{
+  const lookup=(h,o,cb)=> o&&o.all ? cb(null,[{address:ip,family:4}]) : cb(null,ip,4);
+  const req=https.get({host:"github.com",port:443,path:"/",servername:"github.com",lookup,timeout:8000,
+    headers:{"user-agent":"probe"}},
+    r=>{r.resume();res(ip.padEnd(18)+" -> HTTP "+r.statusCode+" ✅");});
+  req.on("timeout",()=>{req.destroy();res(ip.padEnd(18)+" -> 超时 ❌");});
+  req.on("error",e=>res(ip.padEnd(18)+" -> ✗ "+(e.code||e.message)));
+});
+(async()=>{ for(const ip of ips) console.log(await test(ip)); })();
 ```
 
 **本次实测结果**：
 
-| 域名 | 端口 | 结果 | 说明 |
-|---|---|---|---|
-| `github.com` | 443 | ⚠️ TCP 通，但 TLS 被重置 | git 推送走这里，被阻断 |
-| `api.github.com` | 443 | ✅ 完全可用 | REST API 走这里，不受影响 |
-| `ssh.github.com` | 443 | ✅ 可用（SSH 握手成功） | **逃生通道** |
-
-### 第 3 步：确认 SSH 逃生通道真的能跑 SSH
-
-```powershell
-ssh -o BatchMode=yes -o ConnectTimeout=15 -p 443 -T git@ssh.github.com
-```
-
-**结果解读**：
-
-| 输出 | 含义 |
+| IP | 结果 |
 |---|---|
-| `Permission denied (publickey)` | ✅ **链路完全正常**，只是公钥没注册到 GitHub |
-| `Connection timed out` / `reset` | ❌ 这条路也不通，只能上代理 |
+| `140.82.112.3` | ✅ HTTP 200 |
+| `140.82.113.3` | ✅ HTTP 200 |
+| `140.82.114.3` | ✅ HTTP 200 |
+| `140.82.121.3` | ✅ HTTP 200 |
+| `140.82.116.3` | ✅ HTTP 200 |
+| **`20.205.243.166`**（DNS 实际返回的） | ❌ 超时 |
 
-### 第 4 步：查代理配置与进程
+**结论**：SNI 全程都是 `github.com`，换 IP 就能通 —— **直接排除了 SNI 阻断**。
 
-```powershell
-# 系统代理（浏览器用）
-Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' |
-  Select-Object ProxyEnable, ProxyServer, AutoConfigURL
-
-# git 自己的代理（git 不读系统代理！）
-git config --show-origin --get-all http.proxy
-git config --show-origin --get-all credential.helper
-
-# 本机监听端口，找代理
-Get-NetTCPConnection -State Listen | Where-Object LocalPort -in 7890,7897,10809,1080
-```
-
-> ⚠️ **最容易踩的坑**：`ProxyEnable=1 / ProxyServer=127.0.0.1:7890` 只对浏览器生效，**git 默认不读这个设置**。所以"浏览器能上 GitHub，git 推不上去"是常态，不是玄学。
-
-### 第 5 步：确认代理真的在监听
+### 第 4 步：确认 git 有没有能力绕过 DNS
 
 ```powershell
-Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-  Where-Object LocalPort -eq 7890
+git -c http.curloptResolve="github.com:443:140.82.112.3" ls-remote https://github.com/<user>/<repo>.git
 ```
 
-**本次结果**：系统代理指向 `127.0.0.1:7890`，但**该端口没有任何进程监听** —— 代理软件（原来的 `Clash for Windows`）已经不在本机了。系统代理设置是**残留**的。
+**本次结果**：**成功返回 refs**（Git 2.54 支持 `http.curloptResolve`）。
+对照组不加这个参数 → `exit=128` 失败。
 
-> 这也解释了一个迷惑现象：**40 分钟前两次 `git push` 成功了，之后连续 30 多次失败**。
-> 原因是这类阻断是**间歇性**的 —— 同一个域名会在"能通"和"被重置"之间来回切换。
+> 这一步验证了"有解"，而且不用改系统、不用管理员权限。
+
+### 第 5 步：查 DNS 返回了什么
+
+```powershell
+Resolve-DnsName github.com -Type A | Where-Object IPAddress | Select-Object Name,IPAddress
+```
+
+本次返回 `20.205.243.166` —— 就是那个 TLS 不通的 IP。
 
 ---
 
-## 三、三种解决方案（按推荐度排序）
+## 四、解决方案
 
-### 方案 A：SSH over 443（**不需要代理，最稳**）
+### ✅ 方案 A：`git config http.curloptResolve` 固定 IP（**已配置，立即可用**）
 
-原理：`ssh.github.com:443` 走的是纯 SSH 协议，**握手包里没有 SNI**，所以基于域名的阻断抓不到它。
-
-#### A-1 注册 SSH 公钥
+这是本次采用的方案。**只影响本仓库，不动系统设置，不需要管理员权限。**
 
 ```powershell
-# 复制公钥
-Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub" | Set-Clipboard
+cd "C:\Users\嘎嘎在这里\Desktop\java全栈"
+git config http.curloptResolve "github.com:443:140.82.112.3"
+
+# 之后正常推送即可
+git push
 ```
 
-打开 <https://github.com/settings/ssh/new> → Title 随便填（如 `home-desktop`）→ Key 粘贴 → Add SSH key。
+确认已生效：
 
-> 如果连 github.com 网页也打不开（同一套 SNI 阻断），就只能先在能上网的环境（手机热点 / 代理）完成这一步，或者走 A-3。
+```powershell
+git config --get http.curloptResolve
+```
 
-#### A-2 把 SSH 指向 443 端口
+**取消**（等 DNS 恢复正常后）：
 
-编辑 `C:\Users\<你>\.ssh\config`：
+```powershell
+git config --unset http.curloptResolve
+```
+
+#### ⚠️ 这个方案的缺点
+
+**硬编码 IP 会过期。** GitHub 的 IP 会变，写死的 IP 某天可能失效。所以配套写了一个自动探测脚本，见第六节。
+
+---
+
+### 方案 B：改 hosts 文件（系统级，推荐长期方案，**需要管理员权限**）
+
+用记事本**以管理员身份**打开 `C:\Windows\System32\drivers\etc\hosts`，追加：
+
+```
+140.82.112.3  github.com
+140.82.112.3  api.github.com
+```
+
+保存后刷新 DNS：
+
+```powershell
+ipconfig /flushdns
+```
+
+**优点**：所有程序（git、浏览器、其它工具）都受益，不用逐个配置。
+**缺点**：需要管理员；同样有 IP 过期的风险。
+
+> 本次**没能采用**：当前进程无管理员权限，`hosts` 文件写入被拒绝。
+
+---
+
+### 方案 C：换 DNS 服务器
+
+污染通常来自运营商 DNS。改用公共 DNS 往往能拿到正确 IP：
+
+- 阿里 DNS：`223.5.5.5` / `223.6.6.6`
+- 腾讯 DNS：`119.29.29.29`
+- 114 DNS：`114.114.114.114`
+
+改的地方：`设置 → 网络和 Internet → 适配器选项 → 属性 → IPv4 → 使用下面的 DNS 服务器地址`。
+
+改完必须刷新缓存：
+
+```powershell
+ipconfig /flushdns
+```
+
+> **注意**：某些污染是**出口层**做的，改本地 DNS 无效。改完先测 `Resolve-DnsName github.com`，看返回的 IP 变没变。
+
+---
+
+### 方案 D：走代理
+
+前提：本机有代理软件在运行。
+
+```powershell
+# 系统代理（Clash 等）默认只对浏览器生效，git 不读它！必须单独配
+git config --global http.https://github.com.proxy http://127.0.0.1:7890
+git config --global https.https://github.com.proxy http://127.0.0.1:7890
+
+# 取消
+git config --global --unset http.https://github.com.proxy
+git config --global --unset https.https://github.com.proxy
+```
+
+**本次的坑**：系统代理设置里写着 `ProxyEnable=1 / ProxyServer=127.0.0.1:7890`，但**那个端口根本没有进程监听** —— 代理软件（`Clash for Windows`）已经不在这台机器上了，系统设置是残留。
+
+> 记住：**"浏览器能上 GitHub"≠"git 能上"**。git 不读 Windows 系统代理，这是两套独立配置。
+
+---
+
+### 方案 E：SSH over 443（不需要代理，但需要先注册公钥）
+
+`ssh.github.com:443` 走纯 SSH 协议，**握手包里没有 SNI**，因此不受 DNS/SNI 类干扰影响。
+
+```powershell
+# 验证链路（本次实测：返回 Permission denied (publickey) = 链路完全正常）
+ssh -o BatchMode=yes -o ConnectTimeout=15 -p 443 -T git@ssh.github.com
+```
+
+步骤：
+1. 复制公钥：`Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub" | Set-Clipboard`
+2. 粘到 <https://github.com/settings/ssh/new>
+3. 编辑 `~/.ssh/config`：
 
 ```
 Host github.com
@@ -128,136 +217,119 @@ Host github.com
   StrictHostKeyChecking accept-new
 ```
 
-#### A-3 验证并切换 remote
+4. 切换 remote 并推送：
 
 ```powershell
-ssh -T git@github.com
-# 期望：Hi gagahaolihai! You've successfully authenticated, but GitHub does not provide shell access.
-
-cd "C:\Users\嘎嘎在这里\Desktop\java全栈"
-git remote set-url origin git@github.com:gagahaolihai/java-backend-90days.git
+git remote set-url origin git@github.com:<user>/<repo>.git
+ssh -T git@github.com      # 期望：Hi <user>! You've successfully authenticated...
 git push
 ```
 
-**好处**：之后再也不需要 PAT、不需要代理，`git push` 永远可用。
+**本次没能采用**：本机有 `~/.ssh/id_ed25519`，但公钥没注册到 GitHub；而代注册需要 PAT 具备 `keys=write`（账号级权限），当前 token 没有。
+
+> **这个方案一次配好，永久有效**，不依赖 IP、不依赖代理、不需要 PAT。强烈建议有空时配掉。
 
 ---
 
-### 方案 B：给 git 配上代理
+### ❌ 方案 F：走 REST API 绕过 github.com（本次实测失败）
 
-前提：本机有代理软件在跑（Clash / v2rayN / mihomo 等）。
+理论上可用 Git Data API 直接推提交（`POST /git/blobs` → `/git/trees` → `/git/commits` → `PATCH /git/refs`），因为 `api.github.com` 是通的。思路正确，但**被权限挡住**：
 
-```powershell
-# 假设代理监听 127.0.0.1:7890
-git config --global http.https://github.com.proxy http://127.0.0.1:7890
-git config --global https.https://github.com.proxy http://127.0.0.1:7890
-
-# 验证
-git config --global --get http.https://github.com.proxy
-
-# 取消（以后走直连）
-git config --global --unset http.https://github.com.proxy
-git config --global --unset https.https://github.com.proxy
+```
+POST /git/blobs    → 403  需要: contents=write
+POST /git/trees    → 403  需要: contents=write
+POST /git/commits  → 403  需要: contents=write
+PUT  /contents/x   → 403  需要: contents=write
 ```
 
-> 上面用的是**按域名生效**的写法（`http.https://github.com.proxy`）而不是 `http.proxy`。区别：前者只对 github.com 走代理，访问公司内网 Git 时不会被误伤。
+**但同一个 token 用 `git push` 是成功的。** 这个矛盾值得记住：
+
+> **「能 git push」≠「能用 REST API 写文件」。** fine-grained token 在 git 协议和 REST API 两条路上的权限判定不一致。
 
 ---
 
-### 方案 C：重试（利用间歇窗口）
-
-这类阻断是间歇性的。写个循环一直试，命中窗口就成功：
-
-```powershell
-$w = "C:\Users\嘎嘎在这里\Desktop\java全栈"
-for($i=1; $i -le 60; $i++){
-  git -C $w push 2>&1 | Write-Output
-  if($LASTEXITCODE -eq 0){ "✅ 第 $i 次成功"; break }
-  Start-Sleep -Seconds 20
-}
-```
-
-**实测效果**：本次在 30 分钟内未命中窗口，但不失为临时手段。
-
----
-
-### 方案 D：走 REST API 绕过 github.com（**权限受限时用不了**）
-
-理论上可以用 Git Data API（`POST /git/blobs` → `/git/trees` → `/git/commits` → `PATCH /git/refs`）把提交直接推上去，因为 `api.github.com` 是通的。
-
-**但本机实测失败**：fine-grained token 报 `403`，`x-accepted-github-permissions: contents=write`。
-
-奇怪的是**同一个 token 用 `git push` 是能成功的**（成功过两次）。结论：
-- `Contents: write` 对 **git 协议**有效
-- 但对 **REST Git Data API** 不生效
-
-> 记住这个差异：**"能 git push" ≠ "能用 API 写文件"**。
-
----
-
-## 四、判断流程速查
+## 五、判断流程速查
 
 ```
 git push 失败
     │
-    ├─ api.github.com 也不通？ ──→ 整体断网，查网络/DNS
+    ├─ api.github.com 也不通？ ──→ 整体断网，查网线/WiFi/DNS
     │
     └─ 只有 github.com 不通
             │
-            ├─ Test-NetConnection github.com 443 为 True，
-            │  但 git 报 Connection was reset
-            │        └─→ SNI 阻断
+            ├─ Test-NetConnection 为 True 但 git 失败
+            │        └─→ TCP 通、应用层被卡。做【第 3 步：固定 IP 测试】
             │
-            ├─ ssh -p 443 git@ssh.github.com 返回 Permission denied (publickey)？
-            │        └─ 是 ──→ 【方案 A】注册公钥 + 走 443，一劳永逸 ✅
+            ├─ 固定到别的 GitHub IP 能通？
+            │        └─ 是 ──→ 【方案 A】curloptResolve 固定 IP（本仓库已配）✅
+            │                  或【方案 B】改 hosts（需管理员）
+            │                  或【方案 C】换 DNS
             │
-            ├─ 本机有代理在跑？ ──→ 【方案 B】git config 配代理
+            ├─ 固定到任何 IP 都不通 ──→ 大概率真·SNI/出口阻断
+            │        └─ 【方案 D】代理 或【方案 E】SSH over 443
             │
-            └─ 都没有 ──→ 【方案 C】循环重试，同时考虑装个代理
+            └─ ssh -p 443 git@ssh.github.com 返回 Permission denied (publickey)？
+                     └─ 是 ──→【方案 E】注册公钥 + 走 443，一劳永逸 ✅
 ```
 
 ---
 
-## 五、本次事件时间线（真实记录）
+## 六、配套脚本：自动探测可用 IP 并推送
 
-| 时间 | 事件 |
-|---|---|
-| 19:5x | 两次 `git push` **成功**（`1e231c4..d2997df`、`d2997df..3a4e235`） |
-| 之后 | 新增 11 个文件（W1 任务书）并提交，`git push` 开始失败 |
-| +30min | 连续 34 次失败：`Connection was reset` / `Failed to connect after 21s` |
-| 诊断 | 发现 `api.github.com` 通、`github.com` TLS 被重置、`ssh.github.com:443` 可用 |
-| 同时发现 | 系统代理指向 `127.0.0.1:7890` 但无进程监听；`Clash for Windows` 目录已空 → 代理软件已不存在 |
-| 尝试 | REST API 推送 → `403`（token 权限模型与 git 协议不一致） |
-| 结论 | 走【方案 A】需要先注册 SSH 公钥（token 缺 `keys=write`，无法代注册） |
+`http.curloptResolve` 写死 IP 会过期。仓库里放了 [`工具/github-push.ps1`](../../工具/github-push.ps1)：
 
-**本机 SSH 公钥**（需要注册的那个）：
+- 依次测试一组 GitHub IP 的**真实 TLS 连通性**（不只是 TCP）
+- 挑第一个能用的，自动带上 `curloptResolve` 执行 `git push`
+- 全部不通时给出明确提示，而不是让你对着 `Connection was reset` 猜
 
-```
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIILBWHLkIlAfVK7RPrGwOfUiElr8r/pBNq2f9Dvf1Oif 1956294275@qq.com
+用法：
+
+```powershell
+cd "C:\Users\嘎嘎在这里\Desktop\java全栈"
+powershell -File 工具\github-push.ps1
 ```
 
 ---
 
-## 六、命令速查
+## 七、命令速查
 
 | 目的 | 命令 |
 |---|---|
-| 测 TCP | `Test-NetConnection github.com -Port 443 -InformationLevel Quiet` |
-| 测 SSH 443 | `ssh -o BatchMode=yes -p 443 -T git@ssh.github.com` |
+| 测 TCP（**不够，只是第一步**） | `Test-NetConnection github.com -Port 443 -InformationLevel Quiet` |
+| 看 DNS 返回什么 IP | `Resolve-DnsName github.com -Type A \| Where-Object IPAddress` |
+| 测 SSH over 443 | `ssh -o BatchMode=yes -p 443 -T git@ssh.github.com` |
+| git 绕过 DNS 固定 IP | `git -c http.curloptResolve="github.com:443:140.82.112.3" push` |
+| 查看已配的固定 IP | `git config --get http.curloptResolve` |
+| 取消固定 IP | `git config --unset http.curloptResolve` |
 | 看系统代理 | `Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'` |
 | 看 git 代理 | `git config --show-origin --get-all http.proxy` |
-| 看监听端口 | `Get-NetTCPConnection -State Listen \| Where-Object LocalPort -eq 7890` |
+| 查端口有没有真在监听 | `Get-NetTCPConnection -State Listen \| Where-Object LocalPort -eq 7890` |
+| 刷新 DNS 缓存 | `ipconfig /flushdns` |
+| 禁止交互输密码（避免卡住） | `$env:GIT_TERMINAL_PROMPT=0` |
 | 强制 HTTP/1.1 | `git -c http.version=HTTP/1.1 push` |
-| 禁止交互输密码 | `$env:GIT_TERMINAL_PROMPT=0` |
-| 看 remote | `git remote -v` |
-| 切 SSH | `git remote set-url origin git@github.com:<user>/<repo>.git` |
 
 ---
 
-## 七、教训（写给自己）
+## 八、本次事件时间线（真实记录）
 
-1. **"能通"和"能用"是两回事**：`Test-NetConnection` 只做 TCP 握手，TLS 层被重置它测不出来。判断网络问题必须做到应用层。
-2. **`api.github.com` 通 ≠ `github.com` 通**：GitHub 的 API 域名和 git 域名是分开的，阻断策略也不同。
-3. **浏览器能上不代表命令行能上**：git 不读 Windows 系统代理，这是两套配置。
-4. **"能 git push" ≠ "能用 REST API 写"**：fine-grained token 对这两条路的权限判定不一致。
-5. **间歇性故障要有耐心也要有记录**：正因为前两次成功了，才排除了"配置全错"的可能，把范围缩到"网络阻断"。
+| 时间 | 事件 |
+|---|---|
+| 19:5x | 两次 `git push` **成功**（`1e231c4..d2997df`、`d2997df..3a4e235`）—— 说明当时 DNS 恰好返回了好 IP |
+| 之后 | 新增 11 个文件（W1 任务书）并提交，`git push` 开始持续失败 |
+| +30min | 连续 34 次失败：`Connection was reset` / `Failed to connect after 21s` |
+| 误判 | 看到「TCP 通、TLS 被重置」+「`api.github.com` 通」，**误判为 SNI 阻断** |
+| 修正 | 做「固定 IP 测 TLS」实验：换 IP 就能通，而 SNI 全程不变 → **推翻 SNI 判断，确认是 DNS 解析问题** |
+| 验证 | `git -c http.curloptResolve=... ls-remote` 成功，不加则失败 |
+| 解决 | 写入仓库本地配置 `http.curloptResolve`，`git push` 恢复正常 |
+| 结果 | `3a4e235..c5b2213` 推送成功，远端 5 个提交 / 39 个文件 |
+
+---
+
+## 九、教训
+
+1. **`Test-NetConnection` 通 ≠ 能用。** 它只做 TCP 握手。判断网络问题必须**打到应用层**（发一次真的 HTTPS 请求）。
+2. **一开始的判断可能是错的，要设计能推翻它的实验。** 我最初认为是 SNI 阻断，理由是"TCP 通但 TLS 被重置，且 api 域名正常"。真正推翻它的是**固定 IP 测试**：SNI 没变、只换了 IP 就通了 —— 一个变量，直接证伪。**排查就是不断设计单变量实验。**
+3. **先找"能通的反例"。** 发现 `ssh.github.com:443` 和多个 GitHub IP 都能通，比继续猜原因有价值得多。
+4. **浏览器能上 ≠ 命令行能上。** git 不读 Windows 系统代理，两套配置。
+5. **「能 git push」≠「能用 REST API 写」。** 同一个 token 在两条路上的权限判定不一致。
+6. **间歇性故障要记录时间线。** 正因为"前两次成功了"，才排除了"配置全错"，把范围缩到网络层。

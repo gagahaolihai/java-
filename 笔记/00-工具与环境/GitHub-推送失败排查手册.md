@@ -286,8 +286,36 @@ git push 失败
 
 ```powershell
 cd "C:\Users\嘎嘎在这里\Desktop\java全栈"
-powershell -File 工具\github-push.ps1
+
+# 探测并推送一次
+powershell -NoProfile -ExecutionPolicy Bypass -File 工具\github-push.ps1
+
+# 探测后固化到本仓库配置（之后 git push 直接可用）
+powershell -NoProfile -ExecutionPolicy Bypass -File 工具\github-push.ps1 -Persist
+
+# DNS 恢复正常后清除固化配置
+powershell -NoProfile -ExecutionPolicy Bypass -File 工具\github-push.ps1 -Clear
 ```
+
+> **`-ExecutionPolicy Bypass` 不能省。** Windows 默认执行策略禁止运行未签名脚本，否则报
+> `... is not digitally signed. You cannot run this script on the current system.`
+> （这只影响本次调用，不会降低系统的安全设置。）
+
+> **脚本文件必须存成「UTF-8 带 BOM」。** Windows PowerShell 5.1 读取 `.ps1` 时，
+> 如果文件没有 BOM，会**按系统 ANSI 编码（中文 Windows 是 GBK）解析**，
+> 于是脚本里的中文全变成乱码（如 `鏈兘鏄`），轻则乱码输出，重则**引号/括号配对错乱导致语法报错**。
+> 用 VS Code 保存时选「UTF-8 with BOM」；或用下面这行命令转换：
+>
+> ```powershell
+> $p = "工具\github-push.ps1"
+> $t = [IO.File]::ReadAllText($p, (New-Object Text.UTF8Encoding($false))).TrimStart([char]0xFEFF)
+> [IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($true)))
+> ```
+>
+> 检查前三个字节是不是 `EF BB BF`：
+> ```powershell
+> $b = [IO.File]::ReadAllBytes("工具\github-push.ps1"); '{0:X2} {1:X2} {2:X2}' -f $b[0],$b[1],$b[2]
+> ```
 
 ---
 

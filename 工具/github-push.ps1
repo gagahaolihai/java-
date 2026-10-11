@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     在国内网络环境下可靠地推送到 GitHub —— 自动探测可用的 GitHub IP 并绕过 DNS 污染。
 
@@ -25,16 +25,21 @@
     清除本仓库已固化的 http.curloptResolve（DNS 恢复正常后用）。
 
 .EXAMPLE
-    powershell -File 工具\github-push.ps1
+    powershell -NoProfile -ExecutionPolicy Bypass -File 工具\github-push.ps1
     探测可用 IP 并推送一次。
 
 .EXAMPLE
-    powershell -File 工具\github-push.ps1 -Persist
+    powershell -NoProfile -ExecutionPolicy Bypass -File 工具\github-push.ps1 -Persist
     探测后固化到本仓库配置，以后 `git push` 直接可用。
 
 .EXAMPLE
-    powershell -File 工具\github-push.ps1 -Clear
+    powershell -NoProfile -ExecutionPolicy Bypass -File 工具\github-push.ps1 -Clear
     清除固化配置（等 DNS 恢复后建议执行）。
+
+.NOTES
+    1) 必须带 -ExecutionPolicy Bypass，否则 Windows 会拒绝运行未签名脚本。
+    2) 本文件必须保存为 UTF-8 with BOM。Windows PowerShell 5.1 读取无 BOM 的 .ps1 时会按
+       系统 ANSI 编码（中文 Windows 为 GBK）解析，导致中文乱码甚至引号配对错乱报语法错误。
 #>
 [CmdletBinding()]
 param(
@@ -108,7 +113,7 @@ try {
     if ($alreadyPinned) {
         Write-Warn2 "本仓库已固化 http.curloptResolve = $alreadyPinned"
         Write-Host '  跳过直连测试（该配置会覆盖系统 DNS）。想测真实直连请先运行：'
-        Write-Host '    powershell -File 工具\github-push.ps1 -Clear'
+        Write-Host '    powershell -NoProfile -ExecutionPolicy Bypass -File 工具\github-push.ps1 -Clear'
         Write-Host ''
     } else {
         Write-Step '先测试直连（系统 DNS）…'
@@ -173,7 +178,8 @@ try {
     } else {
         Write-Host ''
         Write-Host '提示：加 -Persist 参数可把该 IP 固化到本仓库配置，之后 `git push` 直接可用。'
-        Write-Host '      git push 现在失败的话，运行： powershell -File 工具\github-push.ps1 -Persist'
+        Write-Host '      git push 现在失败的话，运行：'
+        Write-Host '      powershell -NoProfile -ExecutionPolicy Bypass -File 工具\github-push.ps1 -Persist'
     }
 
 } finally {

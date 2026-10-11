@@ -175,6 +175,13 @@ java全栈/
 
 ## 已知待办
 
+- [ ] **注册 SSH 公钥**（解决 `github.com` 被阻断导致 push 失败的根本办法）：
+      `Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub" | Set-Clipboard` → 粘到 <https://github.com/settings/ssh/new>，
+      然后把 `~/.ssh/config` 的 `Host github.com` 改成 `HostName ssh.github.com` + `Port 443`。
+      完整诊断过程与三种方案见 [GitHub 推送失败排查手册](./笔记/00-工具与环境/GitHub-推送失败排查手册.md)
+- [ ] **轮换 GitHub PAT**：当前 token 的 `Issues` / `Pull requests` 是只读、且缺 `Administration`，
+      重新生成时按 [MCP 配置文档第七节](./笔记/00-工具与环境/GitHub-MCP配置.md) 的权限表勾选
+- [ ] **仓库改名**：当前叫 `java-`（建仓库时输入的中文被 GitHub 过滤），建议改成 `java-backend-90days`
 - [ ] `笔记/mysql.md` 里的图片用的是本机绝对路径（`C:\Users\...\Typora\...`），推到 GitHub 后会全部裂图。需要把图片移到 `assets/` 并用相对路径引用（Typora 一次性设置见 [笔记规范](./笔记/README.md)）。
 - [ ] `代码/Text01` 是早期练习，保留作存档。
 
